@@ -37,6 +37,21 @@
       <button class="btn ghost" data-testid="reset" type="button" @click="resetFilters">重置条件</button>
     </form>
 
+    <form v-if="meta.key === 'usage_meter'" class="filter-bar bill-export-bar" @submit.prevent="downloadBill">
+      <label class="filter-item">
+        <span>已出账编号</span>
+        <input
+          v-model="billNo"
+          data-testid="bill-no"
+          placeholder="例如 BILL-0001"
+        />
+      </label>
+      <button class="btn primary" data-testid="bill-export" type="submit" :disabled="downloadingBill">
+        {{ downloadingBill ? '正在续做并导出…' : '账单文件导出' }}
+      </button>
+      <span v-if="billMessage" class="bill-message" data-testid="bill-message">{{ billMessage }}</span>
+    </form>
+
     <table class="data-table">
       <thead>
         <tr>
@@ -98,6 +113,7 @@ import { computed, onMounted, ref } from 'vue'
 
 import {
   createEntry,
+  downloadBillFile,
   downloadEntries,
   listEntries,
   moduleMeta,
@@ -115,6 +131,9 @@ const filterFields = meta.fields.slice(0, 3)
 const showCreate = ref(false)
 const creating = ref(false)
 const createValues = ref<Record<string, string>>({})
+const billNo = ref('')
+const downloadingBill = ref(false)
+const billMessage = ref('')
 const stats = computed(() => [
   { label: meta.metrics[0], value: total.value },
   { label: meta.metrics[1], value: rows.value.filter((row) => row.status === meta.statuses[1]).length },
@@ -141,6 +160,21 @@ async function exportRows() {
     await downloadEntries(meta.key, filters.value)
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '导出失败'
+  }
+}
+
+async function downloadBill() {
+  errorMessage.value = ''
+  billMessage.value = ''
+  downloadingBill.value = true
+  try {
+    await downloadBillFile(billNo.value)
+    billMessage.value = '账单文件已交付；如分段曾中断，本次已用原账单号续做。'
+  } catch (error) {
+    billMessage.value = error instanceof Error ? error.message : '账单导出失败'
+    errorMessage.value = billMessage.value
+  } finally {
+    downloadingBill.value = false
   }
 }
 

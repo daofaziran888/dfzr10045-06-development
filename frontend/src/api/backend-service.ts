@@ -54,6 +54,31 @@ export async function downloadEntries(
   URL.revokeObjectURL(url)
 }
 
+export async function downloadBillFile(billNo: string): Promise<void> {
+  const normalizedBillNo = billNo.trim()
+  if (!normalizedBillNo) throw new Error('请先填写已出账编号')
+  const response = await request(
+    `/api/usage_meter/bills/${encodeURIComponent(normalizedBillNo)}/export`,
+  )
+  if (response.status === 409) {
+    const body = await response.json().catch(() => null)
+    throw new Error(body?.detail ?? '账单文件尚有分段未生成，暂不能下载')
+  }
+  if (!response.ok) throw new Error('账单文件导出失败')
+
+  const disposition = response.headers.get('Content-Disposition') ?? ''
+  const matched = disposition.match(/filename="?([^";]+)"?/i)
+  const filename = matched?.[1] || `${normalizedBillNo}.csv`
+  const url = URL.createObjectURL(await response.blob())
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = filename
+  document.body.appendChild(anchor)
+  anchor.click()
+  document.body.removeChild(anchor)
+  URL.revokeObjectURL(url)
+}
+
 export async function loadOverview(): Promise<OverviewResult> {
   const response = await request('/api/overview')
   if (!response.ok) throw new Error('运营概览读取失败')

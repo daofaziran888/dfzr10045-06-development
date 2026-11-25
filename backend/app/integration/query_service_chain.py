@@ -71,8 +71,8 @@ def execute_query_chain(
     snapshot = snapshot_with_cache(plan_id=plan_id, endpoint_id=endpoint_id,
                                     contract_id=contract_id, rows=matched_rows)
 
-    # 记录用量
-    _record_usage(consumer_app_id, endpoint_id, 1, actual_rows)
+    # 记录用量（保留与本次查询计划执行的关联，供账单逐笔核对原计划号）
+    _record_usage(consumer_app_id, endpoint_id, 1, actual_rows, plan_id=plan_id)
 
     return {
         "status": "ok",
@@ -208,6 +208,7 @@ def _record_usage(
     endpoint_id: str,
     call_count: int,
     row_count: int,
+    plan_id: int | str | None = None,
 ) -> None:
     """记录用量计量——计量读数与查询计划需逐条对得上才能进入结算。"""
     meter_rows = store.rows("usage_meter")
@@ -222,6 +223,7 @@ def _record_usage(
         "计量窗口": datetime.now().strftime("%Y-%m-%dT%H"),
         "结算口径": "按调用次数",
         "计量时间": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "关联计划": str(plan_id) if plan_id is not None else "",
         "status": "计量中",
         "pending": True,
         "abnormal": False,

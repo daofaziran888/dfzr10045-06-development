@@ -86,6 +86,58 @@ class QueryPlanService(BaseModuleService):
         """查询端点名下的全部查询计划数据集。"""
         return [r for r in store.rows(self.MODULE) if r.get("所属端点") == endpoint_id]
 
+    def rerun_plan(
+        self,
+        plan_ref: int | str | dict[str, Any],
+        actual_rows: int,
+        elapsed_ms: float = 1.0,
+        *,
+        create_new: bool = False,
+    ) -> dict[str, Any]:
+        """源数据更正后重跑计划。
+
+        默认在同一计划号上追加执行历史并写入新的实际行数；create_new=True
+        时复制为一次新的计划执行（新 QPLN 编号）。已出账账单保存的是出账时
+        快照，因此无论采用哪种重跑方式，都不会回写账单明细。
+        """
+        original = plan_ref if isinstance(plan_ref, dict) else None
+        if original is None:
+            plan_id = int(str(plan_ref).removeprefix("QPLN-").lstrip("0") or "0") if isinstance(plan_ref, str) and str(plan_ref).startswith("QPLN-") else int(plan_ref)
+            original = store.find(self.MODULE, plan_id)
+        if original is None:
+            return {"status": "error", "message": "查询计划不存在"}
+
+        history = original.setdefault("执行历史", [])
+        history.append({
+            "execution_no": original.get("计划执行号") or original.get("计划编号"),
+            "actual_rows": original.get("实际行数", "0"),
+            "executed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        })
+        original["重跑次数"] = int(original.get("重跑次数", "0") or "0") + 1
+
+        if create_new:
+            rows = store.rows(self.MODULE)
+            new_id = max((int(r.get("id", 0)) for r in rows), default=0) + 1
+            new_plan = dict(original)
+            new_plan.update({
+                "id": new_id,
+                "计划编号": f"QPLN-{new_id:04d}",
+                "实际行数": str(actual_rows),
+                "执行耗时": f"{elapsed_ms:.1f}ms",
+                "status": "已返回",
+                "pending": False,
+                "abnormal": False,
+                "重跑来源": original.get("计划编号"),
+                "计划执行号": f"{original.get('计划编号')}-R{original['重跑次数'] + 1}",
+            })
+            rows.append(new_plan)
+            result = self.complete_plan(new_id, actual_rows, elapsed_ms)
+            return {"status": "rerun", "plan": new_plan, "new_plan": new_plan, "result": result}
+
+        result = self.complete_plan(int(original["id"]), actual_rows, elapsed_ms)
+        original["计划执行号"] = f"{original.get('计划编号')}-R{original['重跑次数'] + 1}"
+        return {"status": "rerun", "plan": original, "result": result}
+
     def get_distorted_plans(self) -> list[dict[str, Any]]:
         """查询全部计划失真记录，供预估模型优化消费。"""
         return [r for r in store.rows(self.MODULE) if r.get("status") == "计划失真"]
@@ -99,3 +151,8 @@ def execute_plan_with_distortion_check(endpoint_id: str, filters: dict, base_row
     plan = service.build_plan(endpoint_id, filters, 1, min(actual_rows or 1, base_rows), estimated, False)
     result = service.complete_plan(int(plan["id"]), actual_rows, elapsed_ms)
     return {"plan": plan, "status": result["status"], "deviation": result["deviation"]}
+
+
+def rerun_plan(plan_ref: int | str | dict[str, Any], actual_rows: int, *args: Any, **kwargs: Any) -> dict:
+    """模块级入口：源数据更正后重跑查询计划。"""
+    return QueryPlanService().rerun_plan(plan_ref, actual_rows, *args, **kwargs)

@@ -9,10 +9,11 @@ from datetime import datetime
 from typing import Any
 
 from app.services.base import BaseModuleService
+from app.services.bill_export import BillExportService
 from app.store import store
 
 
-class UsageMeterService(BaseModuleService):
+class UsageMeterService(BaseModuleService, BillExportService):
     MODULE = "usage_meter"
     ENTITY = "用量读数"
     OPERATION_TERM = "查询"
@@ -21,6 +22,10 @@ class UsageMeterService(BaseModuleService):
     STATUS_ORDER = ["计量中", "已结算", "待复核", "已作废"]
     ACTION_RULES = {"提交结算": "已结算", "复核读数": "待复核", "作废读数": "已作废"}
     NEGATIVE_ACTIONS = []
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        # 账单导出器的可选参数（output_dir/segment_size/writer）也允许直接传给本服务。
+        BillExportService.__init__(self, *args, **kwargs)
 
     def record_usage(
         self,
@@ -87,10 +92,15 @@ class UsageMeterService(BaseModuleService):
         return {"matched": matched, "mismatched": mismatched, "details": details}
 
     def settle_window(self, app_id: str, endpoint_id: str, window: str) -> dict[str, Any]:
-        """按计量窗口聚合结算：只结算对账一致的读数，返回账单数据集。"""
+        """按计量窗口聚合结算：只结算对账一致的读数，返回账单数据集。
+
+        出账时同步冻结账单明细：原取数计划号与计量人员核准的交付行数进入
+        usage_bill 快照。之后计划重跑只影响计划数据集，不影响已出账账单。
+        """
         total_calls = 0
         total_rows = 0
         settled = 0
+        settled_meters: list[dict[str, Any]] = []
         for meter in store.rows(self.MODULE):
             if (
                 meter.get("消费方应用") == app_id
@@ -99,15 +109,57 @@ class UsageMeterService(BaseModuleService):
                 and meter.get("status") == "计量中"
             ):
                 total_calls += int(meter.get("调用次数", "0") or "0")
-                total_rows += int(meter.get("返回行数", "0") or "0")
+                # 出账时允许计量人员写入“核准交付行数”；未单独核准则以当前返回行数为准。
+                approved_rows = int(
+                    meter.get("核准交付行数")
+                    or meter.get("交付行数")
+                    or meter.get("返回行数", "0")
+                    or "0"
+                )
+                total_rows += approved_rows
+                meter["核准交付行数"] = approved_rows
                 meter["status"] = "已结算"
                 meter["pending"] = False
                 settled += 1
+                settled_meters.append(meter)
+
+        bill = None
+        if settled_meters:
+            bill = self.create_bill(
+                settled_meters,
+                app_id=app_id,
+                endpoint_id=endpoint_id,
+                window=window,
+                total_calls=total_calls,
+                total_rows=total_rows,
+            )
+        else:
+            # 结算接口可能因重试而没有新读数；尽量找回同一窗口的原账单号。
+            for existing in self.list_bills():
+                if (
+                    existing.get("消费方应用") == app_id
+                    and existing.get("所属端点") == endpoint_id
+                    and str(existing.get("计量窗口", "")).startswith(window)
+                ):
+                    bill = existing
+                    break
+
+        bill_no = bill.get("账单编号") if bill else ""
         return {
             "window": window,
             "settled_count": settled,
             "total_calls": total_calls,
             "total_rows": total_rows,
+            "delivery_rows": total_rows,
+            "approved_rows": total_rows,
+            "bill": bill,
+            "billing": bill,
+            "账单": bill,
+            "账单编号": bill_no,
+            "出账编号": bill_no,
+            "bill_no": bill_no,
+            "bill_id": bill_no,
+            "download_url": f"/api/usage_meter/bills/{bill_no}/export" if bill_no else "",
         }
 
     def get_meters_for_app(self, app_id: str) -> list[dict[str, Any]]:
@@ -121,3 +173,28 @@ def meter_and_reconcile_plans(app_id: str, endpoint_id: str, calls: int, rows: i
     service = UsageMeterService()
     meter = service.record_usage(app_id, endpoint_id, calls, rows, plan_id)
     return {"meter": meter, "reconcile": service.reconcile_with_plans()}
+
+
+def settle_window(app_id: str, endpoint_id: str, window: str) -> dict[str, Any]:
+    """模块级入口：按窗口结算并生成已出账账单快照。"""
+    return UsageMeterService().settle_window(app_id, endpoint_id, window)
+
+
+def issue_bill(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    return UsageMeterService().issue_bill(*args, **kwargs)
+
+
+def export_bill_file(bill_ref: Any = None, *args: Any, **kwargs: Any) -> dict[str, Any]:
+    return UsageMeterService().export_bill_file(bill_ref, *args, **kwargs)
+
+
+def export_bill(bill_ref: Any = None, *args: Any, **kwargs: Any) -> dict[str, Any]:
+    return UsageMeterService().export_bill(bill_ref, *args, **kwargs)
+
+
+def download_bill(bill_ref: Any, *args: Any, **kwargs: Any) -> dict[str, Any]:
+    return UsageMeterService().download_bill(bill_ref, *args, **kwargs)
+
+
+def resume_bill_file(bill_ref: Any, *args: Any, **kwargs: Any) -> dict[str, Any]:
+    return UsageMeterService().resume_bill_file(bill_ref, *args, **kwargs)

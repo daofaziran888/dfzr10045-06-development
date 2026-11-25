@@ -6,10 +6,16 @@ import io
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 
 from app.schemas import ActionPayload, ActionResult, EntryPayload, PageResult
 from app.services import service_for
+from app.services.bill_export import (
+    BillExportService,
+    BillFileNotReadyError,
+    BillNotFoundError,
+    BillSegmentError,
+)
 
 router = APIRouter(prefix="/api", tags=["业务资源"])
 
@@ -47,8 +53,39 @@ def export_entries(
     request: Request,
     keyword: str | None = Query(default=None),
     status: str | None = Query(default=None),
-) -> StreamingResponse:
+) -> Response:
     service = require_service(module)
+
+    # 已出账账单明细导出：/api/usage_meter/export?bill_no=BILL-...
+    # 与通用清单导出共用 export 路径，但内容是出账时冻结的逐笔计量快照。
+    bill_ref = (
+        request.query_params.get("bill_no")
+        or request.query_params.get("bill_id")
+        or request.query_params.get("账单编号")
+        or request.query_params.get("出账编号")
+    )
+    if bill_ref:
+        bill_service = BillExportService()
+        try:
+            fault = request.query_params.get("fail_on_segment")
+            options = {"fail_on_segment": int(fault)} if fault and fault.isdigit() else {}
+            payload = bill_service.export_bill_file(bill_ref, **options)
+        except BillNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except BillFileNotReadyError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except BillSegmentError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        filename = payload["filename"]
+        return Response(
+            content=payload["content_bytes"],
+            media_type=payload["media_type"],
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"; '
+                f"filename*=UTF-8''{filename}"
+            },
+        )
+
     filters = {
         key: value.strip()
         for key, value in request.query_params.items()
